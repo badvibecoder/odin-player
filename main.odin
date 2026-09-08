@@ -747,7 +747,7 @@ draw :: proc(app: ^App) {
 	ensure_visible(app.selection, len(app.entries), &app.scroll, list_height)
 
 	// Row 1: title
-	fmt.printf("\x1b[%d;1H\x1b[K%sodin-player — Phase 5%s", TITLE_ROW, scheme.title, RESET)
+	fmt.printf("\x1b[%d;1H\x1b[K%sodin-player - badvibecoder%s", TITLE_ROW, scheme.title, RESET)
 
 	// Row 2: now playing (marquee)
 	if app.loaded {
