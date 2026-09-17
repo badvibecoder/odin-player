@@ -31,7 +31,8 @@ import ma "vendor:miniaudio"
 //   [l]            Cycle loop mode (All -> One -> Off)
 //   [p]            Toggle periodic auto-save
 //   [c]            Cycle color scheme
-//   [q]            Quit (restores terminal + saves config)
+//   [q]            Quit (restores terminal + saves config; SIGINT/SIGTERM/
+//                  SIGHUP/SIGQUIT take the same path)
 
 VOLUME_STEP :: 0.05
 BAR_WIDTH   :: 26
@@ -177,6 +178,12 @@ Config :: struct {
 // Set by the SIGWINCH handler, polled by the main loop.
 winch_flag: b32
 
+// Set by the termination-signal handlers (SIGINT/SIGTERM/SIGHUP/SIGQUIT), also
+// polled by the main loop. The handlers only raise this flag so that signals are
+// handled on the normal shutdown path (config save + terminal restore) instead
+// of killing the process with the terminal still in raw mode.
+quit_flag: b32
+
 main :: proc() {
 	arg_dir := ""
 	if len(os.args) > 1 {
@@ -245,9 +252,14 @@ main :: proc() {
 		fmt.eprintf("error: failed to switch terminal to raw mode\n")
 		return
 	}
-	defer restore_terminal(original)
+	defer shutdown_terminal(original)
 
-	setup_winch_handler()
+	setup_signal_handlers()
+
+	// Draw on the alternate screen buffer: the shell's scrollback stays intact
+	// and, on exit, the shell prompt reappears on the line it was on when we
+	// were launched instead of being appended to our last frame.
+	fmt.printf("%s%s", ENTER_ALT_SCREEN, HIDE_CURSOR)
 
 	app.rows, app.cols = get_terminal_size()
 	clear_screen()
@@ -257,6 +269,9 @@ main :: proc() {
 	seek: Seek_State
 	last_save := time.tick_now()
 	loop: for {
+		if quit_flag {
+			break loop
+		}
 		if winch_flag {
 			winch_flag = false
 			clear_screen()
@@ -968,13 +983,34 @@ on_winch :: proc "c" (_: posix.Signal) {
 	winch_flag = true
 }
 
-setup_winch_handler :: proc() {
+// on_terminate is the handler for the usual termination signals. It only sets a
+// flag (async-signal-safe); the main loop then leaves through the same path as
+// `q`, so config is saved and the terminal is restored either way.
+on_terminate :: proc "c" (_: posix.Signal) {
+	quit_flag = true
+}
+
+setup_signal_handlers :: proc() {
 	act: posix.sigaction_t
 	posix.sigemptyset(&act.sa_mask)
-	act.sa_handler = on_winch
 	act.sa_flags = {}
+
+	act.sa_handler = on_winch
 	if posix.sigaction(posix.Signal(posix.SIGWINCH), &act, nil) != .OK {
 		fmt.eprintf("warning: failed to install SIGWINCH handler\n")
+	}
+
+	act.sa_handler = on_terminate
+	signals := [4]posix.Signal{
+		posix.Signal(posix.SIGINT),
+		posix.Signal(posix.SIGTERM),
+		posix.Signal(posix.SIGHUP),
+		posix.Signal(posix.SIGQUIT),
+	}
+	for sig in signals {
+		if posix.sigaction(sig, &act, nil) != .OK {
+			fmt.eprintf("warning: failed to install handler for signal %d\n", int(sig))
+		}
 	}
 }
 
@@ -1056,6 +1092,14 @@ save_config :: proc(app: ^App, silent: bool = false) {
 
 // --- terminal ---
 
+// The UI lives on the alternate screen buffer, like vim/htop/less: the shell's
+// own screen and scrollback are untouched, and `LEAVE_ALT_SCREEN` restores the
+// cursor to where it was before we drew anything.
+ENTER_ALT_SCREEN :: "\x1b[?1049h"
+LEAVE_ALT_SCREEN :: "\x1b[?1049l"
+HIDE_CURSOR      :: "\x1b[?25l"
+SHOW_CURSOR      :: "\x1b[?25h"
+
 enter_raw_mode :: proc() -> (original: posix.termios, ok: bool) {
 	if posix.tcgetattr(posix.STDIN_FILENO, &original) != .OK {
 		return original, false
@@ -1072,12 +1116,23 @@ enter_raw_mode :: proc() -> (original: posix.termios, ok: bool) {
 	if posix.tcsetattr(posix.STDIN_FILENO, .TCSANOW, &raw) != .OK {
 		return original, false
 	}
-	return raw, true
+	// Return the saved (cooked) state, not `raw`: the caller restores this on
+	// exit, so handing back the raw settings would make the restore a no-op.
+	return original, true
 }
 
 restore_terminal :: proc(original: posix.termios) {
 	t := original
 	posix.tcsetattr(posix.STDIN_FILENO, .TCSANOW, &t)
+}
+
+// shutdown_terminal is the single exit path for the terminal: re-enable the
+// saved termios state (echo, canonical mode, output post-processing), show the
+// cursor again, then hand the screen back to the shell. Order matters — the
+// terminal is in cooked mode again by the time the shell prints its prompt.
+shutdown_terminal :: proc(original: posix.termios) {
+	restore_terminal(original)
+	fmt.printf("%s%s", SHOW_CURSOR, LEAVE_ALT_SCREEN)
 }
 
 read_stdin :: proc(buf: []byte) -> int {

@@ -35,7 +35,9 @@ filesystem) and only shows folders plus `.mp3` / `.wav` files.
 - **Resume**: reopens the last track at the last playback position.
 - **Auto-save**: progress is saved to disk every 30 seconds, so a crash or power loss
   costs at most ~30 seconds of listening — useful for audiobooks and lectures.
-- **4 ANSI color schemes**, terminal-resize handling (SIGWINCH), and clean shutdown.
+- **4 ANSI color schemes**, terminal-resize handling (SIGWINCH), and clean shutdown: the UI
+  uses the alternate screen buffer, so quitting drops you back at the shell prompt with
+  your scrollback intact. `SIGINT`/`SIGTERM`/`SIGHUP`/`SIGQUIT` take the same exit path as `q`.
 - Config persisted to `~/.odin-player/config.json`.
 
 ## Requirements
@@ -184,8 +186,14 @@ A few behaviors are one-line constants at the top of [`main.odin`](main.odin):
 
 ## Notes
 
-- The terminal is switched to raw/non-blocking mode while running and restored on exit
-  (including on `q`).
+- The terminal is switched to raw/non-blocking mode while running and restored on exit —
+  on `q`, and also when the process is asked to stop with `SIGINT`, `SIGTERM`, `SIGHUP`, or
+  `SIGQUIT` (those handlers just set a quit flag, so the normal shutdown path still saves
+  config). Only `SIGKILL` can leave the terminal in raw mode.
+- The UI is drawn on the **alternate screen buffer** (`\x1b[?1049h`) and the cursor is hidden
+  while running. On exit the buffer is released (`\x1b[?1049l`) and the cursor restored, so
+  the shell prompt reappears where it was when the player was launched — the UI does not
+  scroll away into your history.
 - If the saved resume file no longer exists (or is outside the directory you opened),
   the player starts stopped instead of erroring.
 
